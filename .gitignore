@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+cache/
+
+# Model weights (large, downloadable)
+*.pt
+
+# Video clips and tracking outputs (large binary files)
+*.mp4
+
+# Kaggle GPU testing scratch (not part of the actual pipeline)
+kaggle_cli_env/
+kaggle_dataset/
+kaggle_output/
+kaggle_tracking_log*.txt
+scratch_run_log.txt
+
+# Claude Code session data
+.claude/
