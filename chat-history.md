@@ -61,4 +61,34 @@ Newest entries are appended at the bottom. Never overwritten.
 - Workspace is clean and fully self-contained with core tracking pipeline ([`track.py`](file:///C:/Users/maham/Documents/daycare-fyp/track.py) and [`persistent_tracker.py`](file:///C:/Users/maham/Documents/daycare-fyp/persistent_tracker.py)).
 - Step A single-camera persistent tracking is stabilized.
 
+---
+
+## 2026-08-12 — Step B Cross-Camera Re-ID: Kaggle test runs on multiple camera pairs
+
+**What we worked on:**
+- Running Step B (cross-camera Re-ID, per CLAUDE.md) on Kaggle's free GPU, using `kaggle_kernel_crosscam/script.py` (a self-contained headless version of `dual_track.py` + `cross_camera_matcher.py` that writes annotated output videos + a decision log to `/kaggle/working/`).
+- Kaggle setup already existed from a prior session: dataset `aimanshahidhuff/daycare-fyp-test-clips` (`kaggle_dataset/`) and kernel `aimanshahidhuff/daycare-cross-camera-gpu-test` (`kaggle_kernel_crosscam/`), authenticated via `kaggle_cli_env` (kaggle.exe lives in `venv/Scripts/kaggle.exe`).
+
+**Run 1 — camera2.mp4 + camera5.mp4 (kernel version 6):**
+- Script was already staged for this pair from before this session (`CAM1_VIDEO_NAME = "camera2.mp4"`, `CAM2_VIDEO_NAME = "camera5.mp4"`), dataset already had both clips uploaded.
+- Pushed and ran to completion. Result: **8 distinct cross-camera identities (X-IDs) found**, several confirmed `CROSS-CAMERA MATCH` links in the log (e.g. sim=0.73, 0.79, 0.83). No errors.
+- Outputs downloaded to `kaggle_output_crosscam/`: `output_tracked_camera1_crosscam.mp4` (= camera2.mp4 footage, 644 frames, 66MB) and `output_tracked_camera2_crosscam.mp4` (= camera5.mp4 footage, 260 frames, 23MB), plus `cross_camera_log.txt`.
+- **Important naming gotcha (told to user, worth remembering):** inside the script/log, the two video slots are always generically labelled `"camera1"`/`"camera2"` regardless of which actual camera file is in that slot — e.g. in this run "camera1" in the log = the actual `camera2.mp4` file, "camera2" in the log = `camera5.mp4`. Don't confuse the generic slot label with the real filename.
+- User has NOT yet visually reviewed these two output videos (was offered, hadn't gotten to it before moving to the next pair).
+
+**Explained to user (plain-language, no code changes):** confirmed and explained the ID-assignment guarantee in both `persistent_tracker.py` (per-camera local IDs via `next_global_id`) and `cross_camera_matcher.py` (cross-camera X-IDs via `next_cross_id`) — both are monotonically-increasing counters that are NEVER reused/recycled for a different person, even if a person only appears in one camera and never gets a confirmed 2-camera match. A person who only appears in camera A simply keeps their own permanent, unshared X-ID for the whole session; that number is never handed to an unrelated person in camera B.
+
+**Run 2 — camera6.mp4 + camera7.mp4 (kernel version 7) — IN PROGRESS, NOT YET CONFIRMED DONE:**
+- User asked to test this new pair. Neither clip was in the Kaggle dataset yet, so:
+  1. Copied `camera6.mp4` and `camera7.mp4` (already existed locally in the project root) into `kaggle_dataset/`.
+  2. Ran `kaggle datasets version -p kaggle_dataset -m "add camera6 and camera7 test clips" -r zip` — succeeded, dataset confirmed `ready`.
+  3. Edited `kaggle_kernel_crosscam/script.py`: `CAM1_VIDEO_NAME = "camera6.mp4"`, `CAM2_VIDEO_NAME = "camera7.mp4"` (was camera2/camera5).
+  4. Pushed kernel — now **kernel version 7**.
+  5. Started polling `kaggle kernels status aimanshahidhuff/daycare-cross-camera-gpu-test` in the background. Last confirmed check showed still `RUNNING` (~11+ minutes in — camera7.mp4 is a bigger file than camera5.mp4 so this run is expected to take longer than run 1's ~13 minutes). The polling loop hit its own script timeout and got killed before the job finished; the Kaggle job itself was NOT stopped, only the local polling script was. A follow-up manual status check was attempted but the tool call got interrupted/rejected before returning a result, so **completion is still unconfirmed as of session end**.
+
+**Next steps (resume here):**
+1. Run `kaggle kernels status aimanshahidhuff/daycare-cross-camera-gpu-test` (via `venv/Scripts/kaggle.exe`) to see if version 7 (camera6+camera7) finished. If still `RUNNING`, keep polling; if `COMPLETE`, run `kaggle kernels output aimanshahidhuff/daycare-cross-camera-gpu-test -p kaggle_output_crosscam` to pull the new outputs (this will overwrite the camera2+camera5 outputs currently sitting in `kaggle_output_crosscam/` — consider renaming/moving the run-1 files first if the user wants to keep both sets side by side for comparison).
+2. Report the new X-ID count + match log for camera6+camera7, same as was done for run 1.
+3. User still hasn't visually watched either set of output videos yet (Step A/B's whole point, per CLAUDE.md, is the visual check) — offer to open them once both runs are confirmed done.
+
 

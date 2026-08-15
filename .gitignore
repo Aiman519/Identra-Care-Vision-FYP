@@ -14,7 +14,10 @@ cache/
 kaggle_cli_env/
 kaggle_dataset/
 kaggle_output/
+kaggle_output_crosscam/
+kaggle_output_crosscam_run2/
 kaggle_tracking_log*.txt
+kaggle_cross_camera_log.txt
 scratch_run_log.txt
 
 # Claude Code session data
