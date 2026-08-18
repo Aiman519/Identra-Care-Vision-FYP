@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  import-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # CPU wheels first so the plain `pip install -r requirements.txt` below
+      # doesn't pull the multi-GB CUDA build of torch on a runner with no GPU.
+      - name: Install CPU-only torch/torchvision
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # No display and no test video in CI, so this doesn't run the pipeline -
+      # it only proves every import at module load time resolves against the
+      # pinned boxmot API. This is exactly the class of bug this workflow
+      # exists to catch: DeepOCSORT/ReIDDetectMultiBackend silently not
+      # existing in 13.0.17 went unnoticed until someone ran the script.
+      - name: Import-check pipeline modules
+        run: |
+          python -c "import track"
+          python -c "import dual_track"
+          python -c "import persistent_tracker"
+          python -c "import cross_camera_matcher"

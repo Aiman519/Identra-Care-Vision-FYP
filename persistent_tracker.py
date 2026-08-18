@@ -8,12 +8,57 @@ This module wraps standard online MOT trackers (DeepOCSORT / BoTSORT) and adds:
 4. Duplicate Suppression: Filters duplicate overlapping detections (IoU > 0.4).
 """
 
+import copy
+from collections import deque
 from pathlib import Path
-import cv2
-import torch
 import numpy as np
-from ultralytics import YOLO
-from boxmot import DeepOCSORT, ReIDDetectMultiBackend
+import torch
+from boxmot.motion.kalman_filters.aabb.xysr_kf import KalmanFilterXYSR
+
+
+def _patched_unfreeze(self):
+    """
+    Upstream boxmot bug fix (KalmanFilterXYSR.unfreeze, boxmot 13.0.17): the
+    original method assumes at least 2 real observations exist in history_obs
+    before a gap, and crashes with IndexError when a track had only 1 real hit
+    before going quiet (indices[-2] on a length-1 array). Surfaces specifically
+    when max_age is raised above ~60 (more time for a 1-hit track to linger),
+    which is why max_age=200 here needs this patch (mirrors the fix already
+    applied in kaggle_kernel_crosscam/script.py).
+    """
+    if self.attr_saved is not None:
+        new_history = copy.deepcopy(list(self.history_obs))
+        self.__dict__ = self.attr_saved
+        self.history_obs = deque(list(self.history_obs)[:-1], maxlen=self.max_obs)
+        occur = [int(d is None) for d in new_history]
+        indices = np.where(np.array(occur) == 0)[0]
+        if len(indices) < 2:
+            self.history_obs.pop()
+            return
+        index1, index2 = indices[-2], indices[-1]
+        box1 = np.asarray(new_history[index1], dtype=np.float64).reshape(-1)
+        box2 = np.asarray(new_history[index2], dtype=np.float64).reshape(-1)
+        x1, y1, s1, r1 = (float(v) for v in box1[:4])
+        w1, h1 = float(np.sqrt(s1 * r1)), float(np.sqrt(s1 / r1))
+        x2, y2, s2, r2 = (float(v) for v in box2[:4])
+        w2, h2 = float(np.sqrt(s2 * r2)), float(np.sqrt(s2 / r2))
+        time_gap = float(index2 - index1)
+        dx, dy = (x2 - x1) / time_gap, (y2 - y1) / time_gap
+        dw, dh = (w2 - w1) / time_gap, (h2 - h1) / time_gap
+
+        for i in range(index2 - index1):
+            x, y = x1 + (i + 1) * dx, y1 + (i + 1) * dy
+            w, h = w1 + (i + 1) * dw, h1 + (i + 1) * dh
+            s, r = w * h, w / h
+            new_box = np.array([x, y, s, r]).reshape((4, 1))
+            self.update(new_box)
+            if not i == (index2 - index1 - 1):
+                self.predict()
+                self.history_obs.pop()
+        self.history_obs.pop()
+
+
+KalmanFilterXYSR.unfreeze = _patched_unfreeze
 
 
 def compute_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
@@ -40,7 +85,7 @@ class PersistentIDManager:
 
     def __init__(
         self,
-        reid_backend: ReIDDetectMultiBackend,
+        reid_backend,
         sim_threshold: float = 0.73,
         duplicate_iou_threshold: float = 0.40,
         max_gallery_size: int = 25,
@@ -63,31 +108,15 @@ class PersistentIDManager:
 
     def _extract_embeddings(self, frame: np.ndarray, boxes: np.ndarray) -> np.ndarray:
         """
-        Crops bounding boxes and extracts L2-normalized 512-dim Re-ID embeddings.
+        Extracts L2-normalized Re-ID embeddings for each box via the tracker's own
+        ReID backend (base_tracker.model), which crops + preprocesses internally.
         """
         if len(boxes) == 0:
             return np.empty((0, 512), dtype=np.float32)
 
-        crops = []
-        h_frame, w_frame = frame.shape[:2]
-
-        for box in boxes:
-            x1, y1, x2, y2 = [int(v) for v in box[:4]]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w_frame, x2), min(h_frame, y2)
-
-            if x2 - x1 < 10 or y2 - y1 < 10:
-                crop = np.zeros((128, 64, 3), dtype=np.uint8)
-            else:
-                crop = frame[y1:y2, x1:x2]
-
-            crops.append(crop)
-
-        with torch.no_grad():
-            tensor = self.reid_backend._preprocess(crops)
-            feats = self.reid_backend(tensor)
-            if isinstance(feats, torch.Tensor):
-                feats = feats.cpu().numpy()
+        boxes_np = np.asarray(boxes, dtype=np.float32)[:, :4]
+        feats = self.reid_backend.get_features(boxes_np, frame)
+        feats = np.asarray(feats, dtype=np.float32)
 
         norms = np.linalg.norm(feats, axis=1, keepdims=True)
         norms[norms == 0] = 1e-6

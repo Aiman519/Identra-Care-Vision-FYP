@@ -1,0 +1,16 @@
+# Core detection + tracking.
+# boxmot's public API changed between releases (DeepOCSORT -> DeepOcSort,
+# ReIDDetectMultiBackend removed, _preprocess made private) - the scripts in
+# this repo are written against 13.0.17 specifically. Bumping this version
+# needs a matching pass over track.py / dual_track.py / persistent_tracker.py,
+# not just a version bump.
+boxmot==13.0.17
+ultralytics>=8.3
+opencv-python>=4.9
+numpy>=1.26,<3
+
+# torch / torchvision: install CPU wheels explicitly if you don't have a CUDA
+# GPU (boxmot/ultralytics both fall back to CPU cleanly):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+torchvision>=0.17
