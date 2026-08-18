@@ -10,9 +10,10 @@ and matching reappearing children against inactive tracks.
 
 from pathlib import Path
 import cv2
+import numpy as np
 import torch
 from ultralytics import YOLO
-from boxmot import DeepOCSORT, ReIDDetectMultiBackend
+from boxmot import DeepOcSort
 from persistent_tracker import PersistentIDManager
 
 # ---- Change SOURCE to 0 for live webcam, or "camera1.mp4" / "camera2.mp4" ----
@@ -35,17 +36,13 @@ def resize_for_display(frame):
 def main():
     print("Initializing YOLOv8s Detector & OSNet Re-ID Model...")
     detector = YOLO(DETECTOR_MODEL)
-    base_tracker = DeepOCSORT(
-        model_weights=REID_WEIGHTS,
-        device="cpu",
-        fp16=False,
+    base_tracker = DeepOcSort(
+        reid_weights=REID_WEIGHTS,
+        device=torch.device("cpu"),
+        half=False,
         max_age=200,
     )
-    reid_backend = ReIDDetectMultiBackend(
-        weights=REID_WEIGHTS,
-        device=torch.device("cpu"),
-        fp16=False,
-    )
+    reid_backend = base_tracker.model
 
     persistent_manager = PersistentIDManager(
         reid_backend=reid_backend,
@@ -69,15 +66,15 @@ def main():
             break
         frame_idx += 1
 
-        det_result = detector.predict(frame, classes=[0], conf=0.15, verbose=False)[0]
+        det_result = detector.predict(frame, classes=[0], conf=0.15, verbose=False, device="cpu")[0]
         boxes = det_result.boxes
         if len(boxes) == 0:
-            dets = torch.empty((0, 6))
+            dets = np.empty((0, 6), dtype=np.float32)
         else:
-            xyxy = boxes.xyxy.cpu()
-            conf = boxes.conf.cpu().reshape(-1, 1)
-            cls = boxes.cls.cpu().reshape(-1, 1)
-            dets = torch.hstack([xyxy, conf, cls])
+            xyxy = boxes.xyxy.cpu().numpy()
+            conf = boxes.conf.cpu().numpy().reshape(-1, 1)
+            cls = boxes.cls.cpu().numpy().reshape(-1, 1)
+            dets = np.hstack([xyxy, conf, cls]).astype(np.float32)
 
         # Base tracker update
         raw_tracks = base_tracker.update(dets, frame)
