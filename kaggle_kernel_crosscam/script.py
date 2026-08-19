@@ -13,7 +13,21 @@ import subprocess
 import sys
 import glob
 
-subprocess.check_call([sys.executable, "-m", "pip", "install", "boxmot==13.0.17", "ultralytics"])
+# Kaggle's default container currently ships torch built for CUDA 12.8, whose
+# precompiled kernels only cover compute capability sm_70+ (Volta and newer). The
+# P100 GPU on the free tier is Pascal (sm_60), so CUDA calls fail with "no kernel
+# image is available for execution on the device" and everything silently falls
+# back to CPU. Install an older CUDA 12.1 build of torch/torchvision that still
+# ships sm_60 kernels, pinned in the SAME install command as boxmot/ultralytics so
+# pip's resolver can't quietly pull the newer (incompatible) torch back in.
+print("Installing torch==2.4.1 / torchvision==0.19.1 (cu121) - older build that still supports the P100's Pascal (sm_60) architecture")
+
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install",
+    "boxmot==13.0.17", "ultralytics",
+    "torch==2.4.1", "torchvision==0.19.1",
+    "--extra-index-url", "https://download.pytorch.org/whl/cu121",
+])
 
 import cv2
 import copy
@@ -95,6 +109,7 @@ class PersistentIDManager:
         max_gallery_size: int = 25,
         max_inactive_age: int = 100000,
         verbose: bool = False,
+        cam_name: str = "",
     ):
         self.reid_backend = reid_backend
         self.sim_threshold = sim_threshold
@@ -102,6 +117,10 @@ class PersistentIDManager:
         self.max_gallery_size = max_gallery_size
         self.max_inactive_age = max_inactive_age
         self.verbose = verbose
+        # Every camera runs its OWN independent gid counter starting at 1, so gid
+        # numbers collide between cameras in a shared log. Prefixing every printed
+        # line with cam_name removes that ambiguity.
+        self.cam_name = f"{cam_name} " if cam_name else ""
 
         self.next_global_id = 1
         self.raw_to_global = {}
@@ -159,7 +178,7 @@ class PersistentIDManager:
                 continue
 
             frame_gap = frame_idx - last_f
-            if not (0 < frame_gap <= 90):
+            if not (0 < frame_gap <= 150):  # was 90/3s, widened to 5s
                 continue
 
             last_box = self.last_seen_box.get(gid)
@@ -188,7 +207,7 @@ class PersistentIDManager:
                     candidates.append((d, gid, sim))
                 elif self.verbose:
                     print(
-                        f"[frame {frame_idx}] SPATIAL RESCUE REJECTED: gid {gid} was closest "
+                        f"[frame {frame_idx}] {self.cam_name}SPATIAL RESCUE REJECTED: gid {gid} was closest "
                         f"(d={d:.0f}px) but appearance sim={sim:.2f} < {MIN_SANITY_SIM} -> skipped"
                     )
 
@@ -259,7 +278,7 @@ class PersistentIDManager:
                         if (sim_a_other > sim_a_own + 0.08) and (sim_b_other > sim_b_own + 0.08):
                             if self.verbose:
                                 print(
-                                    f"[frame {frame_idx}] ANTI-SWAP fired: "
+                                    f"[frame {frame_idx}] {self.cam_name}ANTI-SWAP fired: "
                                     f"gid {gid_a}<->{gid_b} (raw {raw_a}<->{raw_b}) | "
                                     f"a: own={sim_a_own:.2f} other={sim_a_other:.2f} | "
                                     f"b: own={sim_b_own:.2f} other={sim_b_other:.2f}"
@@ -278,15 +297,15 @@ class PersistentIDManager:
                 gid = spatial_gid
                 self.raw_to_global[raw_id] = gid
                 if self.verbose:
-                    print(f"[frame {frame_idx}] SPATIAL RESCUE: raw {raw_id} -> gid {gid}")
+                    print(f"[frame {frame_idx}] {self.cam_name}SPATIAL RESCUE: raw {raw_id} -> gid {gid}")
             else:
                 best_gid, best_sim = self._match_inactive(emb, active_global_ids_this_frame)
 
-                if best_gid is not None and best_sim >= 0.68:
+                if best_gid is not None and best_sim >= 0.55:  # was 0.68, lowered
                     gid = best_gid
                     self.raw_to_global[raw_id] = gid
                     if self.verbose:
-                        print(f"[frame {frame_idx}] CENTROID MATCH: raw {raw_id} -> gid {gid} (sim={best_sim:.2f})")
+                        print(f"[frame {frame_idx}] {self.cam_name}CENTROID MATCH: raw {raw_id} -> gid {gid} (sim={best_sim:.2f})")
                 else:
                     gid = self.next_global_id
                     self.next_global_id += 1
@@ -295,7 +314,7 @@ class PersistentIDManager:
                     if self.verbose:
                         best_str = f"{best_sim:.2f}" if best_gid is not None else "n/a"
                         print(
-                            f"[frame {frame_idx}] NEW ID MINTED: raw {raw_id} -> gid {gid} "
+                            f"[frame {frame_idx}] {self.cam_name}NEW ID MINTED: raw {raw_id} -> gid {gid} "
                             f"(best inactive candidate={best_gid}, sim={best_str})"
                         )
 
@@ -326,9 +345,13 @@ class PersistentIDManager:
             h_frame, w_frame = frame.shape[:2]
             box_area = (box[2] - box[0]) * (box[3] - box[1])
             is_near_border = (box[0] < 15) or (box[1] < 15) or (box[2] > w_frame - 15) or (box[3] > h_frame - 15)
-            is_high_quality = (confs[i] >= 0.50) and (box_area >= 1200.0) and (not is_near_border)
+            # near_border is still tracked (used by spatial rescue for border re-entries below),
+            # but no longer blocks the gallery: debug logging showed kids simply standing at the
+            # edge of a wide group shot were being permanently excluded despite high confidence
+            # and full-size boxes - they were never actually cut off, just near the frame edge.
+            is_high_quality = (confs[i] >= 0.50) and (box_area >= 1200.0)
 
-            if max_other_iou < 0.25 and is_high_quality:
+            if max_other_iou < 0.25 and is_high_quality:  # reverted from 0.45 - was letting overlapping crops contaminate the gallery, causing high-confidence wrong matches
                 gallery = self.global_gallery[gid]
                 if len(gallery) < self.max_gallery_size:
                     gallery.append(emb)
@@ -369,7 +392,7 @@ class CrossCameraMatcher:
     match later instead of being stuck as a wrong new ID forever.
     """
 
-    def __init__(self, camera_managers: dict, sim_threshold: float = 0.58, min_gallery_size: int = 3):
+    def __init__(self, camera_managers: dict, sim_threshold: float = 0.65, min_gallery_size: int = 3):
         self.camera_managers = camera_managers
         self.sim_threshold = sim_threshold
         self.min_gallery_size = min_gallery_size
@@ -454,15 +477,21 @@ class CrossCameraMatcher:
                     )
 
     def get_cross_id(self, cam_name: str, local_gid: int):
-        return self.local_to_cross.get((cam_name, local_gid))
+        # Only returns a Global number once CONFIRMED (2+ cameras) - never shown
+        # until sure, so it can never change once shown. Caller falls back to the
+        # local per-camera ID (separate, always available, already stable).
+        cross_id = self.local_to_cross.get((cam_name, local_gid))
+        if cross_id is None or not self._is_confirmed(cross_id):
+            return None
+        return cross_id
 
 
 # ============================================================================
 # Main: headless dual-camera run -> two annotated output videos + shared log
 # ============================================================================
 
-CAM1_VIDEO_NAME = "camera6.mp4"
-CAM2_VIDEO_NAME = "camera7.mp4"
+CAM1_VIDEO_NAME = "camera13.mp4"
+CAM2_VIDEO_NAME = "camera14.mp4"
 
 
 class CameraPipeline:
@@ -538,21 +567,25 @@ def main():
     detector = YOLO("yolov8s.pt")
     reid_weights = Path("clip_market1501.pt")
 
-    base_tracker_1 = DeepOcSort(reid_weights=reid_weights, device=torch.device(device), half=False, max_age=200)
-    base_tracker_2 = DeepOcSort(reid_weights=reid_weights, device=torch.device(device), half=False, max_age=200)
+    # iou_threshold lowered from boxmot's default (0.3) to tolerate bigger frame-to-frame
+    # jumps during fast motion (e.g. dancing) before giving up and minting a new ID -
+    # trade-off: more tolerant of fast movement, but also more willing to latch onto a
+    # nearby WRONG person in a tight crowd, so this is a balance, not a pure win.
+    base_tracker_1 = DeepOcSort(reid_weights=reid_weights, device=torch.device(device), half=False, max_age=200, iou_threshold=0.2)
+    base_tracker_2 = DeepOcSort(reid_weights=reid_weights, device=torch.device(device), half=False, max_age=200, iou_threshold=0.2)
 
     manager_1 = PersistentIDManager(
         reid_backend=base_tracker_1.model, sim_threshold=0.55, max_gallery_size=25,
-        max_inactive_age=100000, verbose=True,
+        max_inactive_age=100000, verbose=True, cam_name="camera1",
     )
     manager_2 = PersistentIDManager(
         reid_backend=base_tracker_2.model, sim_threshold=0.55, max_gallery_size=25,
-        max_inactive_age=100000, verbose=True,
+        max_inactive_age=100000, verbose=True, cam_name="camera2",
     )
 
     matcher = CrossCameraMatcher(
         camera_managers={"camera1": manager_1, "camera2": manager_2},
-        sim_threshold=0.58,
+        sim_threshold=0.65,
         min_gallery_size=3,
     )
 

@@ -46,6 +46,7 @@ class PersistentIDManager:
         max_gallery_size: int = 25,
         max_inactive_age: int = 100000,  # Never expire galleries during video session!
         verbose: bool = False,
+        cam_name: str = "",
     ):
         self.reid_backend = reid_backend
         self.sim_threshold = sim_threshold
@@ -53,6 +54,11 @@ class PersistentIDManager:
         self.max_gallery_size = max_gallery_size
         self.max_inactive_age = max_inactive_age
         self.verbose = verbose
+        # Every camera runs its OWN independent gid counter starting at 1, so gid
+        # numbers collide between cameras in a shared log. Prefixing every printed
+        # line with cam_name removes that ambiguity - without it, "gid 8" could be
+        # either camera's local-ID 8, and there was no way to tell which.
+        self.cam_name = f"{cam_name} " if cam_name else ""
 
         self.next_global_id = 1
         self.raw_to_global = {}  # raw_id -> global_id
@@ -147,7 +153,7 @@ class PersistentIDManager:
                 continue
 
             frame_gap = frame_idx - last_f
-            if not (0 < frame_gap <= 90):  # lost within last 3 seconds
+            if not (0 < frame_gap <= 150):  # lost within last 5 seconds - was 90/3s, widened
                 continue
 
             last_box = self.last_seen_box.get(gid)
@@ -176,7 +182,7 @@ class PersistentIDManager:
                     candidates.append((d, gid, sim))
                 elif self.verbose:
                     print(
-                        f"[frame {frame_idx}] SPATIAL RESCUE REJECTED: gid {gid} was closest "
+                        f"[frame {frame_idx}] {self.cam_name}SPATIAL RESCUE REJECTED: gid {gid} was closest "
                         f"(d={d:.0f}px) but appearance sim={sim:.2f} < {MIN_SANITY_SIM} -> skipped"
                     )
 
@@ -257,7 +263,7 @@ class PersistentIDManager:
                         if (sim_a_other > sim_a_own + 0.08) and (sim_b_other > sim_b_own + 0.08):
                             if self.verbose:
                                 print(
-                                    f"[frame {frame_idx}] ANTI-SWAP fired: "
+                                    f"[frame {frame_idx}] {self.cam_name}ANTI-SWAP fired: "
                                     f"gid {gid_a}<->{gid_b} (raw {raw_a}<->{raw_b}) | "
                                     f"a: own={sim_a_own:.2f} other={sim_a_other:.2f} | "
                                     f"b: own={sim_b_own:.2f} other={sim_b_other:.2f}"
@@ -278,16 +284,16 @@ class PersistentIDManager:
                 gid = spatial_gid
                 self.raw_to_global[raw_id] = gid
                 if self.verbose:
-                    print(f"[frame {frame_idx}] SPATIAL RESCUE: raw {raw_id} -> gid {gid}")
+                    print(f"[frame {frame_idx}] {self.cam_name}SPATIAL RESCUE: raw {raw_id} -> gid {gid}")
             else:
                 # 2. Try Centroid Re-ID Matching (Threshold >= 0.68 for rescue, >= 0.78 for new)
                 best_gid, best_sim = self._match_inactive(emb, active_global_ids_this_frame)
 
-                if best_gid is not None and best_sim >= 0.68:
+                if best_gid is not None and best_sim >= 0.55:  # was 0.68, lowered - real reconnections were landing at 0.49-0.58, just under the old bar
                     gid = best_gid
                     self.raw_to_global[raw_id] = gid
                     if self.verbose:
-                        print(f"[frame {frame_idx}] CENTROID MATCH: raw {raw_id} -> gid {gid} (sim={best_sim:.2f})")
+                        print(f"[frame {frame_idx}] {self.cam_name}CENTROID MATCH: raw {raw_id} -> gid {gid} (sim={best_sim:.2f})")
                 else:
                     # 3. Mint a BRAND NEW ID (Never recycle old IDs for new people!)
                     gid = self.next_global_id
@@ -297,7 +303,7 @@ class PersistentIDManager:
                     if self.verbose:
                         best_str = f"{best_sim:.2f}" if best_gid is not None else "n/a"
                         print(
-                            f"[frame {frame_idx}] NEW ID MINTED: raw {raw_id} -> gid {gid} "
+                            f"[frame {frame_idx}] {self.cam_name}NEW ID MINTED: raw {raw_id} -> gid {gid} "
                             f"(best inactive candidate={best_gid}, sim={best_str})"
                         )
 
@@ -320,7 +326,10 @@ class PersistentIDManager:
             if gid not in self.global_gallery:
                 self.global_gallery[gid] = []
 
-            # Occlusion & Quality Check: Only update gallery if box is NOT overlapping (IoU < 0.25), confidence >= 0.50, and area >= 1200px^2
+            # Occlusion & Quality Check: Only update gallery if box is not heavily overlapping
+            # (IoU < 0.45 - loosened again from 0.35: kids standing shoulder-to-shoulder with
+            # arms overlapping, e.g. a lineup photo, were staying permanently unmatched because
+            # their gallery never reached min_gallery_size), confidence >= 0.50, and area >= 1200px^2
             max_other_iou = 0.0
             for other_box in active_boxes_this_frame:
                 if not np.array_equal(box, other_box):
@@ -331,10 +340,14 @@ class PersistentIDManager:
             h_frame, w_frame = frame.shape[:2]
             box_area = (box[2] - box[0]) * (box[3] - box[1])
             is_near_border = (box[0] < 15) or (box[1] < 15) or (box[2] > w_frame - 15) or (box[3] > h_frame - 15)
-            is_high_quality = (confs[i] >= 0.50) and (box_area >= 1200.0) and (not is_near_border)
+            # near_border is still tracked (used by spatial rescue for border re-entries below),
+            # but no longer blocks the gallery: debug logging showed kids simply standing at the
+            # edge of a wide group shot were being permanently excluded despite high confidence
+            # and full-size boxes - they were never actually cut off, just near the frame edge.
+            is_high_quality = (confs[i] >= 0.50) and (box_area >= 1200.0)
 
-            # Only add features to memory bank when the child is isolated, clear, and fully inside the frame
-            if max_other_iou < 0.25 and is_high_quality:
+            # Only add features to memory bank when the child is mostly clear and fully inside the frame
+            if max_other_iou < 0.25 and is_high_quality:  # reverted from 0.45 - was letting overlapping crops contaminate the gallery, causing high-confidence wrong matches
                 gallery = self.global_gallery[gid]
                 if len(gallery) < self.max_gallery_size:
                     gallery.append(emb)

@@ -24,7 +24,7 @@ import numpy as np
 
 
 class CrossCameraMatcher:
-    def __init__(self, camera_managers: dict, sim_threshold: float = 0.58, min_gallery_size: int = 3):
+    def __init__(self, camera_managers: dict, sim_threshold: float = 0.65, min_gallery_size: int = 3):
         """
         camera_managers: {camera_name: PersistentIDManager} - one entry per camera,
         each already created and being updated independently as usual.
@@ -122,4 +122,16 @@ class CrossCameraMatcher:
             # will be re-evaluated again on the next update() call.
 
     def get_cross_id(self, cam_name: str, local_gid: int):
-        return self.local_to_cross.get((cam_name, local_gid))
+        """
+        Only returns a Global number once it's CONFIRMED (linked from 2+ cameras)
+        - an unconfirmed guess is never shown, so a displayed Global number can
+        never later change. Before confirmation this returns None, so the caller
+        falls back to showing only the local per-camera ID (which is separate,
+        always available, and already stable). Internally the matcher may still
+        have a tentative best guess it keeps re-evaluating each update() call -
+        it just isn't surfaced here until confirmed.
+        """
+        cross_id = self.local_to_cross.get((cam_name, local_gid))
+        if cross_id is None or not self._is_confirmed(cross_id):
+            return None
+        return cross_id

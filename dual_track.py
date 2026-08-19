@@ -25,7 +25,7 @@ SOURCE_CAM2 = "camera2.mp4"
 # -------------------------------------------------------------------------
 
 DETECTOR_MODEL = "yolov8s.pt"
-REID_WEIGHTS = Path("kaggle_output_crosscam/clip_market1501.pt")
+REID_WEIGHTS = Path("clip_market1501.pt")
 MAX_DISPLAY_WIDTH = 720  # smaller since two windows share the screen
 
 
@@ -58,6 +58,7 @@ class CameraPipeline:
             max_gallery_size=25,
             max_inactive_age=100000,
             verbose=True,
+            cam_name=name,
         )
         self.frame_idx = -1
         self.done = False
@@ -98,7 +99,7 @@ def main():
 
     matcher = CrossCameraMatcher(
         camera_managers={cam1.name: cam1.persistent_manager, cam2.name: cam2.persistent_manager},
-        sim_threshold=0.58,
+        sim_threshold=0.65,
         min_gallery_size=3,
     )
 
